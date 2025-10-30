@@ -42,12 +42,21 @@ class CoffeeBeansTableModel(QAbstractTableModel):
                 rating = bean.get("rating")
                 return f"{rating:.1f}" if rating else "-"
 
+        # Background for rating column (keeps previous behavior)
         if role == Qt.BackgroundRole and col == 5:
             rating = bean.get("rating") or 0
             if rating >= 4.5:
-                return QColor(144, 238, 144)
+                return QColor(144, 238, 144)  # light green
             if rating >= 4.0:
-                return QColor(255, 255, 224)
+                return QColor(255, 255, 224)  # light yellow
+
+        # Foreground (text color) for rating column to ensure readability
+        if role == Qt.ForegroundRole and col == 5:
+            rating = bean.get("rating") or 0
+            # if background is light, use dark text; otherwise white
+            if rating >= 4.0:
+                return QColor(0, 0, 0)  # dark text on light bg
+            return QColor(255, 255, 255)  # white text on dark bg
 
         if role == Qt.TextAlignmentRole and col in (0, 5):
             return Qt.AlignCenter
@@ -113,6 +122,13 @@ class BrewingSessionsTableModel(QAbstractTableModel):
                 return QColor(144, 238, 144)
             if rating >= 4.0:
                 return QColor(255, 255, 224)
+
+        # readable text for rating in sessions
+        if role == Qt.ForegroundRole and col == 5:
+            rating = s.get("rating") or 0
+            if rating >= 4.0:
+                return QColor(0, 0, 0)
+            return QColor(255, 255, 255)
 
         if role == Qt.TextAlignmentRole and col in (0, 3, 4, 5):
             return Qt.AlignCenter

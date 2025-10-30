@@ -1,4 +1,4 @@
-# main.py (полный файл — замени им существующий)
+# main.py (замените весь файл этим содержимым)
 import os
 import sys
 from PyQt5 import uic
@@ -6,7 +6,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QDialog, QMessageBox, QMenu, QAction
 )
-from PyQt5.QtGui import QPixmap, QColor
+from PyQt5.QtGui import QColor
 
 from database import DatabaseManager
 from models import CoffeeBeansTableModel, BrewingSessionsTableModel
@@ -15,18 +15,17 @@ from dialogs import CoffeeDialog, BrewingDialog, ImageViewer, DetailsDialog
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UI_DIR = os.path.join(BASE_DIR, "ui")  # <- здесь находятся .ui
 
-# Простой стиль (можешь подправить цвета)
+# Общий стиль приложения
 APP_STYLE = """
-QMainWindow { background: #1f1f1f; color: #eaeaea; }
-QTableView { background: #2b2b2b; color: #eaeaea; gridline-color: #3a3a3a; }
-QHeaderView::section { background: #2f2f2f; color: #eaeaea; padding: 4px; }
-QPushButton { background: #4b6ef6; color: white; border-radius: 6px; padding: 6px; }
-QLineEdit, QTextEdit { background: #262626; color: #f5f5f5; border: 1px solid #3a3a3a; border-radius: 4px; }
+QMainWindow { background: #121212; color: #eaeaea; }
+QWidget { background: #121212; color: #eaeaea; }
+QTableView { background: #1e1e1e; color: #eaeaea; gridline-color: #2a2a2a; }
+QHeaderView::section { background: #212121; color: #eaeaea; padding: 6px; }
+QPushButton { background: #3b82f6; color: white; border-radius: 6px; padding: 6px 10px; }
+QLineEdit, QTextEdit { background: #161616; color: #f5f5f5; border: 1px solid #2a2a2a; border-radius: 4px; }
+QTabBar::tab { background: #212121; color: #eaeaea; padding: 8px 14px; border-radius: 8px; margin: 2px; }
+QTabBar::tab:selected { background: #3b82f6; color: white; }
 """
-
-class DetailsDialogWrapper(DetailsDialog):
-    # Никаких изменений — просто алиас, если где-то используется другое имя
-    pass
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -37,65 +36,53 @@ class MainWindow(QMainWindow):
             raise SystemExit(1)
         uic.loadUi(ui_path, self)
 
-        # Apply style
-        QApplication.instance().setStyleSheet(APP_STYLE)
+        # Apply style (safe: QApplication already exists when main() calls this)
+        app = QApplication.instance()
+        if app:
+            app.setStyleSheet(APP_STYLE)
 
         # DB and models
         self.db = DatabaseManager()
         self.coffee_model = CoffeeBeansTableModel()
         self.brewing_model = BrewingSessionsTableModel()
 
-        # Bind models to tables
-        # (Ожидается, что в .ui есть coffeeTable и brewingTable)
-        self.coffeeTable.setModel(self.coffee_model)
-        self.brewingTable.setModel(self.brewing_model)
-
-        # ====== Навигационные кнопки или стилизация вкладок ======
-        # Если в .ui есть кнопки с именами coffeeTabBtn/sessionsTabBtn/statsTabBtn — покрасим их.
-        # Иначе — применим стиль к tabWidget (или tabs).
+        # Bind models to tables (if widgets exist in ui)
         try:
-            # Попробуем покрасить кнопки (если они определены в .ui)
+            self.coffeeTable.setModel(self.coffee_model)
+        except Exception:
+            pass
+        try:
+            self.brewingTable.setModel(self.brewing_model)
+        except Exception:
+            pass
+
+        # Style navigation (try buttons, else tabs)
+        try:
             self.coffeeTabBtn.setStyleSheet("background-color: #8FBC8F; color: white;")
             self.sessionsTabBtn.setStyleSheet("background-color: #87CEFA; color: white;")
             self.statsTabBtn.setStyleSheet("background-color: #DAA520; color: white;")
         except Exception:
-            # Кнопок нет — применяем стиль к вкладкам QTabWidget
             tab_widget = getattr(self, "tabWidget", None) or getattr(self, "tabs", None)
             if tab_widget:
-                tabbar = tab_widget.tabBar()
-                # Общий CSS для вкладок
-                tabbar.setStyleSheet("""
-                    QTabBar::tab {
-                        background: #3a3a3a;
-                        color: #eaeaea;
-                        padding: 8px 16px;
-                        border-radius: 8px;
-                        margin: 4px;
-                    }
-                    QTabBar::tab:selected {
-                        background: #4b6ef6;
-                        color: white;
-                    }
-                """)
-                # Попробуем расставить индивидуальные цвета (в качестве фона выбранного таба)
-                # setTabTextColor требует QColor
                 try:
-                    tabbar.setTabTextColor(0, QColor("#ffffff"))
-                    tabbar.setTabTextColor(1, QColor("#ffffff"))
-                    tabbar.setTabTextColor(2, QColor("#ffffff"))
+                    tabbar = tab_widget.tabBar()
+                    tabbar.setStyleSheet("""
+                        QTabBar::tab {
+                            background: #3a3a3a;
+                            color: #eaeaea;
+                            padding: 8px 16px;
+                            border-radius: 8px;
+                            margin: 4px;
+                        }
+                        QTabBar::tab:selected {
+                            background: #4b6ef6;
+                            color: white;
+                        }
+                    """)
                 except Exception:
                     pass
 
-        # Buttons (objectNames must match)
-        # Обёртки подключения — если элемент отсутствует, просто пропустить
-        def safe_connect(obj_name, signal, slot):
-            try:
-                getattr(self, obj_name).connect(slot)
-            except Exception:
-                pass
-
-        safe_connect("addCoffeeBtn", self.addCoffeeBtn.clicked, lambda: self.add_coffee())
-        # Но выше может быть запутанно — лучше подключать в явном виде и ловить AttributeError
+        # Connect buttons (safe)
         try:
             self.addCoffeeBtn.clicked.connect(self.add_coffee)
             self.editCoffeeBtn.clicked.connect(self.edit_coffee)
@@ -103,25 +90,27 @@ class MainWindow(QMainWindow):
             self.refreshCoffeeBtn.clicked.connect(self.load_coffee_data)
             self.coffeeSearchBtn.clicked.connect(self.search_coffee)
             self.coffeeClearBtn.clicked.connect(self.clear_coffee_search)
+        except Exception:
+            pass
 
+        try:
             self.addBrewingBtn.clicked.connect(self.add_brewing)
             self.editBrewingBtn.clicked.connect(self.edit_brewing)
             self.deleteBrewingBtn.clicked.connect(self.delete_brewing)
             self.refreshBrewingBtn.clicked.connect(self.load_brewing_data)
             self.brewingSearchBtn.clicked.connect(self.search_brewing)
             self.brewingClearBtn.clicked.connect(self.clear_brewing_search)
-        except AttributeError:
-            # если какие-то кнопки имеют другие имена — это нормально, приложение продолжит работать
+        except Exception:
             pass
 
-        # Selection on cell click: select whole row if tables exist
+        # Row selection on click
         try:
             self.coffeeTable.clicked.connect(lambda idx: self.coffeeTable.selectRow(idx.row()))
             self.brewingTable.clicked.connect(lambda idx: self.brewingTable.selectRow(idx.row()))
         except Exception:
             pass
 
-        # Context menus & double click
+        # Context menus and double click
         try:
             self.coffeeTable.setContextMenuPolicy(Qt.CustomContextMenu)
             self.coffeeTable.customContextMenuRequested.connect(self._coffee_context)
@@ -133,20 +122,27 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # Load
+        # Initial load
         self.load_coffee_data()
         self.load_brewing_data()
+        # update_stats is a method of this class (defined below)
         self.update_stats()
 
     # ---------- загрузка данных ----------
     def load_coffee_data(self):
         beans = self.db.get_all_coffee_beans()
-        self.coffee_model.update_data(beans)
+        try:
+            self.coffee_model.update_data(beans)
+        except Exception:
+            pass
         self.update_stats()
 
     def load_brewing_data(self):
         sessions = self.db.get_all_brewing_sessions()
-        self.brewing_model.update_data(sessions)
+        try:
+            self.brewing_model.update_data(sessions)
+        except Exception:
+            pass
         self.update_stats()
 
     # ---------- CRUD для кофе ----------
@@ -366,26 +362,85 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    # ---------- Статистика ----------
+    # ---------- Статистика (метод внутри класса, правильно отступлён) ----------
     def update_stats(self):
-        try:
-            stats = self.db.get_detailed_statistics()
-            images_count = self.db.get_coffee_with_images_count()
-            total = stats.get("total_beans", 0)
-            pct = (images_count / total * 100) if total else 0
-            text = (
-                f"Всего сортов: {total}\n"
-                f"С изображениями: {images_count} ({pct:.1f}%)\n"
-                f"Всего сессий: {stats.get('total_sessions', 0)}\n"
-                f"Средний рейтинг сортов: {stats.get('avg_bean_rating', 0):.1f}"
-            )
-            try:
-                self.statsText.setPlainText(text)
-            except Exception:
-                pass
-        except Exception:
-            pass
+        # получаем все данные
+        beans = self.db.get_all_coffee_beans()
+        sessions = self.db.get_all_brewing_sessions()
 
+        total_beans = len(beans)
+        total_sessions = len(sessions)
+
+        # количество по уровням обжарки
+        roast_counts = {}
+        for b in beans:
+            lvl = (b.get("roast_level") or "Unknown")
+            roast_counts[lvl] = roast_counts.get(lvl, 0) + 1
+
+        # проценты с изображениями
+        beans_with_images = sum(1 for b in beans if b.get("image"))
+        images_pct = (beans_with_images / total_beans * 100) if total_beans else 0
+
+        # средняя цена/рейтинг сортов
+        prices = [float(b.get("price")) for b in beans if b.get("price") is not None and b.get("price") != ""]
+        avg_price = sum(prices) / len(prices) if prices else 0
+        ratings = [float(b.get("rating")) for b in beans if b.get("rating") is not None and b.get("rating") != ""]
+        avg_bean_rating = sum(ratings) / len(ratings) if ratings else 0
+
+        # топ-5 сортов по рейтингу
+        top_beans = sorted([b for b in beans if b.get("rating")], key=lambda x: x["rating"], reverse=True)[:5]
+
+        # самые популярные методы заваривания
+        method_counts = {}
+        for s in sessions:
+            m = (s.get("brew_method") or "Unknown")
+            method_counts[m] = method_counts.get(m, 0) + 1
+        top_methods = sorted(method_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+
+        # среднее время заваривания
+        brew_times = [int(s.get("brew_time")) for s in sessions if s.get("brew_time") is not None and s.get("brew_time") != ""]
+        avg_brew_time = sum(brew_times)/len(brew_times) if brew_times else 0
+
+        # средние веса
+        coffee_weights = [float(s.get("coffee_weight")) for s in sessions if s.get("coffee_weight") is not None and s.get("coffee_weight") != ""]
+        water_weights = [float(s.get("water_weight")) for s in sessions if s.get("water_weight") is not None and s.get("water_weight") != ""]
+        avg_coffee_weight = sum(coffee_weights)/len(coffee_weights) if coffee_weights else 0
+        avg_water_weight = sum(water_weights)/len(water_weights) if water_weights else 0
+
+        # Строка статистики (подробная)
+        lines = []
+        lines.append(f"Всего сортов: {total_beans}")
+        lines.append(f"Всего сессий: {total_sessions}")
+        lines.append(f"С изображениями: {beans_with_images} ({images_pct:.1f}%)")
+        lines.append(f"Средняя цена: {avg_price:.2f} руб | Средний рейтинг сортов: {avg_bean_rating:.2f}")
+        lines.append("")
+        lines.append("Распределение по уровню обжарки:")
+        for lvl, cnt in roast_counts.items():
+            lines.append(f"  • {lvl}: {cnt}")
+        lines.append("")
+        lines.append("Топ-5 сортов по рейтингу:")
+        if top_beans:
+            for b in top_beans:
+                lines.append(f"  • {b.get('name')} — {b.get('rating'):.1f}")
+        else:
+            lines.append("  • Отсутствуют оценки")
+        lines.append("")
+        lines.append("Самые используемые методы заваривания:")
+        for m, c in top_methods:
+            lines.append(f"  • {m}: {c} раз(а)")
+        lines.append("")
+        lines.append(f"Среднее время заваривания: {avg_brew_time:.1f} сек")
+        lines.append(f"Средний вес кофе: {avg_coffee_weight:.1f} г | Средний вес воды: {avg_water_weight:.1f} г")
+
+        stats_text = "\n".join(lines)
+        try:
+            self.statsText.setPlainText(stats_text)
+        except Exception:
+            te = getattr(self, "statsText", None)
+            if te:
+                te.setPlainText(stats_text)
+
+    # ---------- клавиатурные события ----------
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_F5:
             self.load_coffee_data()
