@@ -1,6 +1,6 @@
-# dialogs.py
 import os
-from typing import Optional, List, Dict, Any
+import sys
+from typing import Optional
 
 from PyQt5 import uic
 from PyQt5.QtCore import Qt, QBuffer, QIODevice
@@ -31,6 +31,12 @@ def pixmap_to_bytes(pix: Optional[QPixmap]) -> Optional[bytes]:
     buf.close()
     return data
 
+def resource_path(relative_path):
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
 def load_pixmap_from_bytes(b: Optional[bytes]) -> Optional[QPixmap]:
     if not b:
@@ -150,22 +156,6 @@ class DetailsDialog(QDialog):
 # -----------------------------
 # Замените существующий класс CoffeeDialog в dialogs.py этим кодом
 
-# Вставить в dialogs.py: обновлённые CoffeeDialog и BrewingDialog
-from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QLabel, QLineEdit, QComboBox, QTextEdit,
-    QDoubleSpinBox, QPushButton, QHBoxLayout, QFileDialog, QMessageBox,
-    QWidget, QSpinBox
-)
-from PyQt5.QtGui import QPixmap
-from PyQt5.QtCore import Qt
-import os
-
-# предполагается, что DatabaseManager импортирован в файле dialogs.py ранее:
-# from database import DatabaseManager
-
-# --------------------------
-# CoffeeDialog (обновлённый)
-# --------------------------
 class CoffeeDialog(QDialog):
     """
     Программный диалог "Добавить / Редактировать сорт кофе".
@@ -174,6 +164,7 @@ class CoffeeDialog(QDialog):
     """
     def __init__(self, db_manager, coffee_data=None, parent=None):
         super().__init__(parent)
+        ui_file = resource_path("ui/coffee_dialog.ui")
         self.db_manager = db_manager
         self.coffee_data = coffee_data or {}
         self.selected_image_path = None
