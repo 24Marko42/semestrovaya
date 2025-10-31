@@ -1,23 +1,22 @@
-# main.py (полный файл — замените им существующий)
-import os
-import sys
+# main.py — компактная версия
+import os, sys, logging
 from PyQt5 import uic
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QSortFilterProxyModel
 from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QDialog, QMessageBox, QMenu, QAction, QHeaderView
+    QApplication, QMainWindow, QDialog, QMessageBox, QMenu, QHeaderView
 )
-from PyQt5.QtGui import QColor
-from PyQt5.QtCore import QSortFilterProxyModel
 
 from database import DatabaseManager
 from models import CoffeeBeansTableModel, BrewingSessionsTableModel
-from dialogs import CoffeeDialog, BrewingDialog, ImageViewer, DetailsDialog
+from dialogs import CoffeeDialog, BrewingDialog, DetailsDialog
+
+# logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UI_DIR = os.path.join(BASE_DIR, "ui")  # <- здесь находятся .ui
 
-# Общий стиль приложения
-APP_STYLE = """
+APP_CSS = """
 QMainWindow { background: #121212; color: #eaeaea; }
 QWidget { background: #121212; color: #eaeaea; }
 QTableView { background: #1e1e1e; color: #eaeaea; gridline-color: #2a2a2a; }
@@ -28,497 +27,306 @@ QTabBar::tab { background: #212121; color: #eaeaea; padding: 8px 14px; border-ra
 QTabBar::tab:selected { background: #3b82f6; color: white; }
 """
 
+def resource_path(rel):
+    base = getattr(sys, "_MEIPASS", BASE_DIR)
+    return os.path.join(base, rel)
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        ui_path = os.path.join(UI_DIR, "main_window.ui")
-        if not os.path.exists(ui_path):
-            QMessageBox.critical(self, "Ошибка", f"Файл интерфейса не найден: {ui_path}")
+        ui_file = resource_path(os.path.join("ui", "main_window.ui"))
+        if not os.path.exists(ui_file):
+            QMessageBox.critical(None, "Ошибка", f"UI не найден: {ui_file}")
             raise SystemExit(1)
-        uic.loadUi(ui_path, self)
+        uic.loadUi(ui_file, self)
+        QApplication.instance().setStyleSheet(APP_CSS)
 
-        # Apply style
-        app = QApplication.instance()
-        if app:
-            app.setStyleSheet(APP_STYLE)
-
-        # DB and models
+        # DB + модели
         self.db = DatabaseManager()
         self.coffee_model = CoffeeBeansTableModel()
         self.brewing_model = BrewingSessionsTableModel()
 
-        # Proxy models for sorting/filtering
-        self.coffee_proxy = QSortFilterProxyModel(self)
-        self.coffee_proxy.setSourceModel(self.coffee_model)
-        # allow case-insensitive sorting/filtering
-        self.coffee_proxy.setSortCaseSensitivity(Qt.CaseInsensitive)
+        # proxy (сортировка/фильтр)
+        self.coffee_proxy = QSortFilterProxyModel(self); self.coffee_proxy.setSourceModel(self.coffee_model)
         self.coffee_proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
-
-        self.brewing_proxy = QSortFilterProxyModel(self)
-        self.brewing_proxy.setSourceModel(self.brewing_model)
-        self.brewing_proxy.setSortCaseSensitivity(Qt.CaseInsensitive)
+        self.brewing_proxy = QSortFilterProxyModel(self); self.brewing_proxy.setSourceModel(self.brewing_model)
         self.brewing_proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
 
-        # Bind proxies to views (if widgets exist)
+        # views
+        self._bind_table("coffeeTable", self.coffee_proxy)
+        self._bind_table("brewingTable", self.brewing_proxy)
+
+        # подключаем кнопки (если есть)
+        self._connect("addCoffeeBtn", self.add_coffee)
+        self._connect("editCoffeeBtn", self.edit_coffee)
+        self._connect("deleteCoffeeBtn", self.delete_coffee)
+        self._connect("refreshCoffeeBtn", self.load_coffee_data)
+        self._connect("coffeeSearchBtn", self.search_coffee)
+        self._connect("coffeeClearBtn", self.clear_coffee_search)
+
+        self._connect("addBrewingBtn", self.add_brewing)
+        self._connect("editBrewingBtn", self.edit_brewing)
+        self._connect("deleteBrewingBtn", self.delete_brewing)
+        self._connect("refreshBrewingBtn", self.load_brewing_data)
+        self._connect("brewingSearchBtn", self.search_brewing)
+        self._connect("brewingClearBtn", self.clear_brewing_search)
+
+        # Enter для поиска
+        self._connect_return("coffeeSearchEdit", self.search_coffee)
+        self._connect_return("coffeeSearchInput", self.search_coffee)
+        self._connect_return("brewingSearchEdit", self.search_brewing)
+
+        # клики/контекст/двойной клик
+        self._safe(lambda: self.coffeeTable.clicked.connect(lambda i: self.coffeeTable.selectRow(i.row())))
+        self._safe(lambda: self.brewingTable.clicked.connect(lambda i: self.brewingTable.selectRow(i.row())))
+        self._safe(lambda: self.coffeeTable.setContextMenuPolicy(Qt.CustomContextMenu))
+        self._safe(lambda: self.coffeeTable.customContextMenuRequested.connect(self._coffee_context))
+        self._safe(lambda: self.coffeeTable.doubleClicked.connect(self.on_coffee_double_clicked))
+        self._safe(lambda: self.brewingTable.setContextMenuPolicy(Qt.CustomContextMenu))
+        self._safe(lambda: self.brewingTable.customContextMenuRequested.connect(self._brewing_context))
+        self._safe(lambda: self.brewingTable.doubleClicked.connect(self.on_brewing_double_clicked))
+
+        # загрузка
+        self.load_coffee_data(); self.load_brewing_data()
+
+    # ---------- утилиты ----------
+    def _safe(self, fn):
+        try: fn()
+        except Exception as e: log.debug("safe skip: %s", e)
+
+    def _connect(self, name, slot):
         try:
-            self.coffeeTable.setModel(self.coffee_proxy)
-            # enable interactive resizing and sorting
-            self.coffeeTable.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-            self.coffeeTable.setSortingEnabled(True)
+            getattr(self, name).clicked.connect(slot)
+        except Exception:
+            log.debug("no widget %s", name)
+
+    def _connect_return(self, name, slot):
+        try:
+            getattr(self, name).returnPressed.connect(slot)
         except Exception:
             pass
 
+    def _bind_table(self, name, proxy):
         try:
-            self.brewingTable.setModel(self.brewing_proxy)
-            self.brewingTable.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-            self.brewingTable.setSortingEnabled(True)
+            view = getattr(self, name)
+            view.setModel(proxy)
+            view.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+            view.setSortingEnabled(True)
+            view.setSelectionBehavior(view.SelectRows)
         except Exception:
-            pass
+            log.debug("table %s not bound", name)
 
-        # Try to style tabs/buttons (non-fatal)
+    def _map_selected_source(self, view, proxy):
         try:
-            self.coffeeTabBtn.setStyleSheet("background-color: #8FBC8F; color: white;")
-            self.sessionsTabBtn.setStyleSheet("background-color: #87CEFA; color: white;")
-            self.statsTabBtn.setStyleSheet("background-color: #DAA520; color: white;")
-        except Exception:
-            tab_widget = getattr(self, "tabWidget", None) or getattr(self, "tabs", None)
-            if tab_widget:
-                try:
-                    tabbar = tab_widget.tabBar()
-                    tabbar.setStyleSheet("""
-                        QTabBar::tab {
-                            background: #3a3a3a;
-                            color: #eaeaea;
-                            padding: 8px 16px;
-                            border-radius: 8px;
-                            margin: 4px;
-                        }
-                        QTabBar::tab:selected {
-                            background: #4b6ef6;
-                            color: white;
-                        }
-                    """)
-                except Exception:
-                    pass
-
-        # Connect buttons (safe)
-        try:
-            self.addCoffeeBtn.clicked.connect(self.add_coffee)
-            self.editCoffeeBtn.clicked.connect(self.edit_coffee)
-            self.deleteCoffeeBtn.clicked.connect(self.delete_coffee)
-            self.refreshCoffeeBtn.clicked.connect(self.load_coffee_data)
-            self.coffeeSearchBtn.clicked.connect(self.search_coffee)
-            self.coffeeClearBtn.clicked.connect(self.clear_coffee_search)
-        except Exception:
-            pass
-
-        try:
-            self.addBrewingBtn.clicked.connect(self.add_brewing)
-            self.editBrewingBtn.clicked.connect(self.edit_brewing)
-            self.deleteBrewingBtn.clicked.connect(self.delete_brewing)
-            self.refreshBrewingBtn.clicked.connect(self.load_brewing_data)
-            self.brewingSearchBtn.clicked.connect(self.search_brewing)
-            self.brewingClearBtn.clicked.connect(self.clear_brewing_search)
-        except Exception:
-            pass
-
-        # Enable search on Enter (returnPressed) if line edits exist
-        try:
-            # Try common names used in earlier code
-            if hasattr(self, "coffeeSearchEdit"):
-                self.coffeeSearchEdit.returnPressed.connect(self.search_coffee)
-            elif hasattr(self, "coffeeSearchInput"):
-                self.coffeeSearchInput.returnPressed.connect(self.search_coffee)
-        except Exception:
-            pass
-
-        try:
-            if hasattr(self, "brewingSearchEdit"):
-                self.brewingSearchEdit.returnPressed.connect(self.search_brewing)
-        except Exception:
-            pass
-
-        # Row selection on cell click (select full row)
-        try:
-            self.coffeeTable.clicked.connect(lambda idx: self.coffeeTable.selectRow(idx.row()))
-            self.brewingTable.clicked.connect(lambda idx: self.brewingTable.selectRow(idx.row()))
-        except Exception:
-            pass
-
-        # Context menus and double click handlers (use proxy → source mapping)
-        try:
-            self.coffeeTable.setContextMenuPolicy(Qt.CustomContextMenu)
-            self.coffeeTable.customContextMenuRequested.connect(self._coffee_context)
-            self.brewingTable.setContextMenuPolicy(Qt.CustomContextMenu)
-            self.brewingTable.customContextMenuRequested.connect(self._brewing_context)
-
-            self.coffeeTable.doubleClicked.connect(self.on_coffee_double_clicked)
-            self.brewingTable.doubleClicked.connect(self.on_brewing_double_clicked)
-        except Exception:
-            pass
-
-        # Initial load
-        self.load_coffee_data()
-        self.load_brewing_data()
-        self.update_stats()
-
-    # ---------- utility: map selection/index from proxy to source ----------
-    def _selected_source_index_from_view(self, view, proxy):
-        """Возвращает первый выбранный source-model QModelIndex или None."""
-        sel = view.selectionModel().selectedRows()
-        if not sel:
-            return None
-        proxy_index = sel[0]
-        try:
-            src_index = proxy.mapToSource(proxy_index)
-            return src_index
+            sel = view.selectionModel().selectedRows()
+            if not sel: return None
+            return proxy.mapToSource(sel[0])
         except Exception:
             return None
 
-    def _source_index_from_proxy_index(self, proxy_index, proxy):
-        try:
-            return proxy.mapToSource(proxy_index)
-        except Exception:
-            return proxy_index
+    def _map_proxy_to_source(self, proxy_index, proxy):
+        try: return proxy.mapToSource(proxy_index)
+        except Exception: return proxy_index
 
-    # ---------- загрузка данных ----------
+    # ---------- загрузка ----------
     def load_coffee_data(self):
-        beans = self.db.get_all_coffee_beans()
         try:
-            self.coffee_model.update_data(beans)
-        except Exception:
-            pass
+            self.coffee_model.update_data(self.db.get_all_coffee_beans())
+        except Exception as e:
+            log.exception(e)
         self.update_stats()
 
     def load_brewing_data(self):
-        sessions = self.db.get_all_brewing_sessions()
         try:
-            self.brewing_model.update_data(sessions)
-        except Exception:
-            pass
+            self.brewing_model.update_data(self.db.get_all_brewing_sessions())
+        except Exception as e:
+            log.exception(e)
         self.update_stats()
 
-    # ---------- CRUD для кофе ----------
+    # ---------- CRUD coffee ----------
     def add_coffee(self):
-        dlg = CoffeeDialog(self.db, parent=self)
-        if dlg.exec_() == QDialog.Accepted:
-            self.load_coffee_data()
+        d = CoffeeDialog(self.db, parent=self)
+        if d.exec_() == QDialog.Accepted: self.load_coffee_data()
 
     def edit_coffee(self):
-        try:
-            src_idx = self._selected_source_index_from_view(self.coffeeTable, self.coffee_proxy)
-            if src_idx is None:
-                QMessageBox.information(self, "Инфо", "Выберите запись для редактирования")
-                return
-            bean = self.coffee_model.coffee_beans[src_idx.row()]
-            dlg = CoffeeDialog(self.db, coffee_data=bean, parent=self)
-            if dlg.exec_() == QDialog.Accepted:
-                self.load_coffee_data()
-        except Exception:
-            QMessageBox.information(self, "Инфо", "Ошибка выбора записи. Проверьте таблицу.")
+        idx = self._map_selected_source(self.coffeeTable, self.coffee_proxy)
+        if not idx:
+            QMessageBox.information(self, "Инфо", "Выберите строку")
+            return
+        bean = self.coffee_model.coffee_beans[idx.row()]
+        d = CoffeeDialog(self.db, coffee_data=bean, parent=self)
+        if d.exec_() == QDialog.Accepted: self.load_coffee_data()
 
     def delete_coffee(self):
-        try:
-            src_idx = self._selected_source_index_from_view(self.coffeeTable, self.coffee_proxy)
-            if src_idx is None:
-                QMessageBox.information(self, "Инфо", "Выберите запись для удаления")
-                return
-            bean = self.coffee_model.coffee_beans[src_idx.row()]
-            reply = QMessageBox.question(self, "Удаление", f"Удалить '{bean.get('name')}'?", QMessageBox.Yes | QMessageBox.No)
-            if reply == QMessageBox.Yes:
-                ok = self.db.delete_coffee_bean(bean["id"])
-                if ok:
-                    self.load_coffee_data()
-                    self.load_brewing_data()
-                else:
-                    QMessageBox.critical(self, "Ошибка", "Не удалось удалить запись")
-        except Exception:
-            QMessageBox.critical(self, "Ошибка", "Ошибка при удалении")
+        idx = self._map_selected_source(self.coffeeTable, self.coffee_proxy)
+        if not idx:
+            QMessageBox.information(self, "Инфо", "Выберите строку")
+            return
+        bean = self.coffee_model.coffee_beans[idx.row()]
+        if QMessageBox.question(self, "Удалить?", f"Удалить '{bean.get('name')}'?", QMessageBox.Yes|QMessageBox.No) == QMessageBox.Yes:
+            if self.db.delete_coffee_bean(bean["id"]): self.load_coffee_data(); self.load_brewing_data()
+            else: QMessageBox.critical(self, "Ошибка", "Не удалось удалить")
 
-    # ---------- CRUD для сессий ----------
+    # ---------- CRUD brewing ----------
     def add_brewing(self):
         beans = self.db.get_all_coffee_beans()
-        if not beans:
-            QMessageBox.information(self, "Инфо", "Добавьте сначала сорт кофе")
-            return
-        dlg = BrewingDialog(self.db, coffee_beans=beans, parent=self)
-        if dlg.exec_() == QDialog.Accepted:
-            self.load_brewing_data()
+        if not beans: QMessageBox.information(self, "Инфо", "Добавьте сначала сорт кофе"); return
+        d = BrewingDialog(self.db, coffee_beans=beans, parent=self)
+        if d.exec_() == QDialog.Accepted: self.load_brewing_data()
 
     def edit_brewing(self):
-        try:
-            src_idx = self._selected_source_index_from_view(self.brewingTable, self.brewing_proxy)
-            if src_idx is None:
-                QMessageBox.information(self, "Инфо", "Выберите запись для редактирования")
-                return
-            session = self.brewing_model.brewing_sessions[src_idx.row()]
-            beans = self.db.get_all_coffee_beans()
-            dlg = BrewingDialog(self.db, coffee_beans=beans, brewing_data=session, parent=self)
-            if dlg.exec_() == QDialog.Accepted:
-                self.load_brewing_data()
-        except Exception:
-            QMessageBox.critical(self, "Ошибка", "Ошибка при редактировании")
+        idx = self._map_selected_source(self.brewingTable, self.brewing_proxy)
+        if not idx: QMessageBox.information(self, "Инфо", "Выберите строку"); return
+        session = self.brewing_model.brewing_sessions[idx.row()]
+        d = BrewingDialog(self.db, coffee_beans=self.db.get_all_coffee_beans(), brewing_data=session, parent=self)
+        if d.exec_() == QDialog.Accepted: self.load_brewing_data()
 
     def delete_brewing(self):
-        try:
-            src_idx = self._selected_source_index_from_view(self.brewingTable, self.brewing_proxy)
-            if src_idx is None:
-                QMessageBox.information(self, "Инфо", "Выберите запись для удаления")
-                return
-            session = self.brewing_model.brewing_sessions[src_idx.row()]
-            reply = QMessageBox.question(self, "Удаление", "Удалить сессию?", QMessageBox.Yes | QMessageBox.No)
-            if reply == QMessageBox.Yes:
-                ok = self.db.delete_brewing_session(session["id"])
-                if ok:
-                    self.load_brewing_data()
-                else:
-                    QMessageBox.critical(self, "Ошибка", "Не удалось удалить запись")
-        except Exception:
-            QMessageBox.critical(self, "Ошибка", "Ошибка при удалении")
+        idx = self._map_selected_source(self.brewingTable, self.brewing_proxy)
+        if not idx: QMessageBox.information(self, "Инфо", "Выберите строку"); return
+        s = self.brewing_model.brewing_sessions[idx.row()]
+        if QMessageBox.question(self, "Удалить?", "Удалить сессию?", QMessageBox.Yes|QMessageBox.No) == QMessageBox.Yes:
+            if self.db.delete_brewing_session(s["id"]): self.load_brewing_data()
+            else: QMessageBox.critical(self, "Ошибка", "Не удалось удалить")
 
-    # ---------- Поиск (с поддержкой ID) ----------
+    # ---------- Поиск (Enter поддерживается) ----------
     def search_coffee(self):
+        q = ""
         try:
-            q = self.coffeeSearchEdit.text().strip()
-        except Exception:
-            # try alternative objectName
-            try:
-                q = self.coffeeSearchInput.text().strip()
-            except Exception:
-                q = ""
+            if hasattr(self, "coffeeSearchEdit"): q = self.coffeeSearchEdit.text().strip()
+            elif hasattr(self, "coffeeSearchInput"): q = self.coffeeSearchInput.text().strip()
+        except Exception: q = ""
         if not q:
-            self.load_coffee_data()
-            return
-        # Если цифры — поиск по ID через БД (сохраняем модель напрямую)
+            self.coffee_proxy.setFilterRegExp(""); self.load_coffee_data(); return
         if q.isdigit():
             beans = self.db.get_all_coffee_beans()
-            matched = [b for b in beans if str(b.get("id")) == q]
-            self.coffee_model.update_data(matched)
-            return
-        # Иначе — делегируем на поиск БД
-        res = self.db.search_coffee_beans(q)
-        self.coffee_model.update_data(res)
+            self.coffee_model.update_data([b for b in beans if str(b.get("id"))==q]); self.coffee_proxy.setFilterRegExp(""); return
+        self.coffee_proxy.setFilterKeyColumn(1); self.coffee_proxy.setFilterRegExp(q)
 
     def clear_coffee_search(self):
         try:
-            if hasattr(self, "coffeeSearchEdit"):
-                self.coffeeSearchEdit.clear()
-            elif hasattr(self, "coffeeSearchInput"):
-                self.coffeeSearchInput.clear()
-        except Exception:
-            pass
-        self.load_coffee_data()
+            if hasattr(self, "coffeeSearchEdit"): self.coffeeSearchEdit.clear()
+            elif hasattr(self, "coffeeSearchInput"): self.coffeeSearchInput.clear()
+        except Exception: pass
+        self.coffee_proxy.setFilterRegExp(""); self.load_coffee_data()
 
     def search_brewing(self):
-        try:
-            q = self.brewingSearchEdit.text().strip()
-        except Exception:
-            q = ""
-        if q:
-            res = self.db.search_brewing_sessions(q)
-            self.brewing_model.update_data(res)
-        else:
-            self.load_brewing_data()
+        q = getattr(self, "brewingSearchEdit", None)
+        q = q.text().strip() if q else ""
+        if not q: self.load_brewing_data(); return
+        self.brewing_model.update_data(self.db.search_brewing_sessions(q))
 
     def clear_brewing_search(self):
         try:
-            self.brewingSearchEdit.clear()
-        except Exception:
-            pass
+            if hasattr(self, "brewingSearchEdit"): self.brewingSearchEdit.clear()
+        except Exception: pass
         self.load_brewing_data()
 
     # ---------- Контекстные меню ----------
     def _coffee_context(self, pos):
         try:
-            m = QMenu(self)
-            view = QAction("Просмотреть", self)
-            view.triggered.connect(self._view_coffee_from_context)
-            edit = QAction("Редактировать", self)
-            edit.triggered.connect(self.edit_coffee)
-            delete = QAction("Удалить", self)
-            delete.triggered.connect(self.delete_coffee)
-            m.addAction(view); m.addAction(edit); m.addAction(delete)
+            m = QMenu(self); m.addAction("Просмотреть", self._view_coffee_from_context)
+            m.addAction("Редактировать", self.edit_coffee); m.addAction("Удалить", self.delete_coffee)
             m.exec_(self.coffeeTable.viewport().mapToGlobal(pos))
-        except Exception:
-            pass
+        except Exception as e: log.debug(e)
 
     def _brewing_context(self, pos):
         try:
-            m = QMenu(self)
-            edit = QAction("Редактировать", self)
-            edit.triggered.connect(self.edit_brewing)
-            delete = QAction("Удалить", self)
-            delete.triggered.connect(self.delete_brewing)
-            m.addAction(edit); m.addAction(delete)
+            m = QMenu(self); m.addAction("Редактировать", self.edit_brewing); m.addAction("Удалить", self.delete_brewing)
             m.exec_(self.brewingTable.viewport().mapToGlobal(pos))
-        except Exception:
-            pass
+        except Exception as e: log.debug(e)
 
     def _view_coffee_from_context(self):
-        try:
-            src_idx = self._selected_source_index_from_view(self.coffeeTable, self.coffee_proxy)
-            if src_idx is None:
-                return
-            bean = self.coffee_model.coffee_beans[src_idx.row()]
-            self._show_coffee_details(bean)
-        except Exception:
-            pass
+        idx = self._map_selected_source(self.coffeeTable, self.coffee_proxy)
+        if not idx: return
+        bean = self.coffee_model.coffee_beans[idx.row()]; self._show_coffee_details(bean)
 
-    # ---------- Детали ----------
+    # ---------- Двойной клик -> детали ----------
     def on_coffee_double_clicked(self, proxy_index):
-        try:
-            src_index = self._source_index_from_proxy_index(proxy_index, self.coffee_proxy)
-            bean = self.coffee_model.coffee_beans[src_index.row()]
-            self._show_coffee_details(bean)
-        except Exception:
-            pass
+        src = self._map_proxy_to_source(proxy_index, self.coffee_proxy)
+        bean = self.coffee_model.coffee_beans[src.row()]; self._show_coffee_details(bean)
 
     def on_brewing_double_clicked(self, proxy_index):
-        try:
-            src_index = self._source_index_from_proxy_index(proxy_index, self.brewing_proxy)
-            session = self.brewing_model.brewing_sessions[src_index.row()]
-            bean = None
-            beans = self.db.get_all_coffee_beans()
-            for b in beans:
-                if b["id"] == session.get("coffee_bean_id"):
-                    bean = b
-                    break
-
-            dlg = DetailsDialog(self)
-            if bean and bean.get("image"):
-                dlg.set_image_from_bytes(bean.get("image"))
-            else:
-                dlg.set_image_from_bytes(None)
-
-            details = (
-                f"Кофе: {session.get('coffee_name') or '-'}\n"
-                f"Метод: {session.get('brew_method') or '-'}\n"
-                f"Температура: {session.get('water_temp') or '-'}\n"
-                f"Время: {session.get('brew_time') or '-'}\n"
-                f"Вес кофе: {session.get('coffee_weight') or '-'}\n"
-                f"Вес воды: {session.get('water_weight') or '-'}\n"
-                f"Рейтинг: {session.get('rating') or '-'}\n"
-                f"Заметки: {session.get('notes') or '-'}\n"
-                f"Дата: {session.get('created_at') or '-'}"
-            )
-            dlg.set_text(details)
-            dlg.exec_()
-        except Exception:
-            pass
+        src = self._map_proxy_to_source(proxy_index, self.brewing_proxy)
+        s = self.brewing_model.brewing_sessions[src.row()]
+        bean = next((b for b in self.db.get_all_coffee_beans() if b["id"]==s.get("coffee_bean_id")), None)
+        dlg = DetailsDialog(self); dlg.set_image_from_bytes(bean.get("image") if bean else None)
+        dlg.set_text("\n".join([
+            f"Кофе: {s.get('coffee_name') or '-'}",
+            f"Метод: {s.get('brew_method') or '-'}",
+            f"Темп: {s.get('water_temp') or '-'}",
+            f"Время: {s.get('brew_time') or '-'}",
+            f"Вес кофе: {s.get('coffee_weight') or '-'}",
+            f"Заметки: {s.get('notes') or '-'}",
+            f"Дата: {s.get('created_at') or '-'}"
+        ])); dlg.exec_()
 
     def _show_coffee_details(self, bean):
-        try:
-            dlg = DetailsDialog(self)
-            dlg.set_image_from_bytes(bean.get("image"))
-            details = (
-                f"Название: {bean.get('name')}\n"
-                f"Обжарщик: {bean.get('roaster') or '-'}\n"
-                f"Уровень обжарки: {bean.get('roast_level') or '-'}\n"
-                f"Происхождение: {bean.get('origin') or '-'}\n"
-                f"Метод обработки: {bean.get('processing_method') or '-'}\n"
-                f"Вкусовые ноты: {bean.get('tasting_notes') or '-'}\n"
-                f"Рейтинг: {bean.get('rating') or '-'}\n"
-                f"Цена: {bean.get('price') or '-'}\n"
-                f"Дата добавления: {bean.get('created_at') or '-'}"
-            )
-            dlg.set_text(details)
-            dlg.exec_()
-        except Exception:
-            pass
+        dlg = DetailsDialog(self); dlg.set_image_from_bytes(bean.get("image"))
+        dlg.set_text("\n".join([
+            f"Название: {bean.get('name')}",
+            f"Обжарщик: {bean.get('roaster') or '-'}",
+            f"Ур. обжарки: {bean.get('roast_level') or '-'}",
+            f"Происхождение: {bean.get('origin') or '-'}",
+            f"Метод обработки: {bean.get('processing_method') or '-'}",
+            f"Вкусовые ноты: {bean.get('tasting_notes') or '-'}",
+            f"Рейтинг: {bean.get('rating') or '-'}",
+            f"Цена: {bean.get('price') or '-'}",
+            f"Дата: {bean.get('created_at') or '-'}"
+        ])); dlg.exec_()
 
-    # ---------- Статистика (метод внутри класса) ----------
+    # ---------- Статистика ----------
     def update_stats(self):
-        beans = self.db.get_all_coffee_beans()
-        sessions = self.db.get_all_brewing_sessions()
+        beans, sessions = self.db.get_all_coffee_beans(), self.db.get_all_brewing_sessions()
+        total_beans, total_sessions = len(beans), len(sessions)
+        roast = {}
+        for b in beans: roast[(b.get("roast_level") or "Unknown")] = roast.get((b.get("roast_level") or "Unknown"),0)+1
+        with_img = sum(1 for b in beans if b.get("image"))
+        prices = [float(b.get("price")) for b in beans if b.get("price") not in (None,"")]
+        avg_price = (sum(prices)/len(prices)) if prices else 0
+        ratings = [float(b.get("rating")) for b in beans if b.get("rating") not in (None,"")]
+        avg_rating = (sum(ratings)/len(ratings)) if ratings else 0
+        methods = {}
+        for s in sessions: methods[s.get("brew_method") or "Unknown"] = methods.get(s.get("brew_method") or "Unknown",0)+1
+        top_methods = sorted(methods.items(), key=lambda x:-x[1])[:5]
+        brew_times = [int(s.get("brew_time")) for s in sessions if s.get("brew_time") not in (None,"")]
+        avg_brew = (sum(brew_times)/len(brew_times)) if brew_times else 0
+        coffee_weights = [float(s.get("coffee_weight")) for s in sessions if s.get("coffee_weight") not in (None,"")]
+        water_weights = [float(s.get("water_weight")) for s in sessions if s.get("water_weight") not in (None,"")]
+        avg_cw = (sum(coffee_weights)/len(coffee_weights)) if coffee_weights else 0
+        avg_ww = (sum(water_weights)/len(water_weights)) if water_weights else 0
 
-        total_beans = len(beans)
-        total_sessions = len(sessions)
-
-        roast_counts = {}
-        for b in beans:
-            lvl = (b.get("roast_level") or "Unknown")
-            roast_counts[lvl] = roast_counts.get(lvl, 0) + 1
-
-        beans_with_images = sum(1 for b in beans if b.get("image"))
-        images_pct = (beans_with_images / total_beans * 100) if total_beans else 0
-
-        prices = [float(b.get("price")) for b in beans if b.get("price") is not None and b.get("price") != ""]
-        avg_price = sum(prices) / len(prices) if prices else 0
-        ratings = [float(b.get("rating")) for b in beans if b.get("rating") is not None and b.get("rating") != ""]
-        avg_bean_rating = sum(ratings) / len(ratings) if ratings else 0
-
-        top_beans = sorted([b for b in beans if b.get("rating")], key=lambda x: x["rating"], reverse=True)[:5]
-
-        method_counts = {}
-        for s in sessions:
-            m = (s.get("brew_method") or "Unknown")
-            method_counts[m] = method_counts.get(m, 0) + 1
-        top_methods = sorted(method_counts.items(), key=lambda x: x[1], reverse=True)[:5]
-
-        brew_times = [int(s.get("brew_time")) for s in sessions if s.get("brew_time") is not None and s.get("brew_time") != ""]
-        avg_brew_time = sum(brew_times)/len(brew_times) if brew_times else 0
-
-        coffee_weights = [float(s.get("coffee_weight")) for s in sessions if s.get("coffee_weight") is not None and s.get("coffee_weight") != ""]
-        water_weights = [float(s.get("water_weight")) for s in sessions if s.get("water_weight") is not None and s.get("water_weight") != ""]
-        avg_coffee_weight = sum(coffee_weights)/len(coffee_weights) if coffee_weights else 0
-        avg_water_weight = sum(water_weights)/len(water_weights) if water_weights else 0
-
-        lines = []
-        lines.append(f"Всего сортов: {total_beans}")
-        lines.append(f"Всего сессий: {total_sessions}")
-        lines.append(f"С изображениями: {beans_with_images} ({images_pct:.1f}%)")
-        lines.append(f"Средняя цена: {avg_price:.2f} руб | Средний рейтинг сортов: {avg_bean_rating:.2f}")
-        lines.append("")
-        lines.append("Распределение по уровню обжарки:")
-        for lvl, cnt in roast_counts.items():
-            lines.append(f"  • {lvl}: {cnt}")
-        lines.append("")
-        lines.append("Топ-5 сортов по рейтингу:")
-        if top_beans:
-            for b in top_beans:
-                lines.append(f"  • {b.get('name')} — {b.get('rating'):.1f}")
-        else:
-            lines.append("  • Отсутствуют оценки")
-        lines.append("")
-        lines.append("Самые используемые методы заваривания:")
-        for m, c in top_methods:
-            lines.append(f"  • {m}: {c} раз(а)")
-        lines.append("")
-        lines.append(f"Среднее время заваривания: {avg_brew_time:.1f} сек")
-        lines.append(f"Средний вес кофе: {avg_coffee_weight:.1f} г | Средний вес воды: {avg_water_weight:.1f} г")
-
-        stats_text = "\n".join(lines)
-        try:
-            self.statsText.setPlainText(stats_text)
+        lines = [
+            f"Всего сортов: {total_beans}",
+            f"Всего сессий: {total_sessions}",
+            f"С изображениями: {with_img} ({(with_img/total_beans*100) if total_beans else 0:.1f}%)",
+            f"Средняя цена: {avg_price:.2f} руб | Средний рейтинг: {avg_rating:.2f}",
+            "",
+            "Распределение по обжарке:"
+        ] + [f"  • {k}: {v}" for k,v in roast.items()] + ["", "Топ методов:"] + [f"  • {m}: {c}" for m,c in top_methods] + [
+            "", f"Среднее время: {avg_brew:.1f} сек",
+            f"Средний вес кофе: {avg_cw:.1f} г | воды: {avg_ww:.1f} г"
+        ]
+        text = "\n".join(lines)
+        try: self.statsText.setPlainText(text)
         except Exception:
-            te = getattr(self, "statsText", None)
-            if te:
-                te.setPlainText(stats_text)
+            t = getattr(self, "statsText", None)
+            if t: t.setPlainText(text)
 
-    # ---------- клавиатурные события ----------
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_F5:
-            self.load_coffee_data()
-            self.load_brewing_data()
-        elif event.key() == Qt.Key_Delete:
+    # ---------- клавиши ----------
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_F5: self.load_coffee_data(); self.load_brewing_data()
+        elif e.key() == Qt.Key_Delete:
             try:
-                cur_tab = self.tabs.currentIndex()
-            except Exception:
-                cur_tab = 0
-            if cur_tab == 0:
-                self.delete_coffee()
-            else:
-                self.delete_brewing()
-        super().keyPressEvent(event)
-
+                cur = self.tabs.currentIndex()
+            except Exception: cur = 0
+            (self.delete_coffee if cur==0 else self.delete_brewing)()
+        super().keyPressEvent(e)
 
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Coffee Journal")
-    win = MainWindow()
-    win.show()
+    w = MainWindow(); w.show()
     sys.exit(app.exec_())
 
-
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
