@@ -10,7 +10,7 @@ import logging
 from PyQt5 import uic
 from PyQt5.QtCore import Qt, QSortFilterProxyModel
 from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QMessageBox, QFileDialog, QTextEdit, QWidget, QVBoxLayout, QMenu, QAction
+    QApplication, QMainWindow, QMessageBox, QFileDialog, QTextEdit, QWidget, QVBoxLayout, QMenu, QAction, QDialog
 )
 
 from database import DatabaseManager
