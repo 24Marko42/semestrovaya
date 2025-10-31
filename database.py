@@ -1,55 +1,62 @@
 # database.py
 import sqlite3
-import os
+import os, sys, shutil
+from datetime import datetime
 from typing import List, Dict, Any, Optional
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import QBuffer, QIODevice
 
+# helper for resources (works with PyInstaller)
+def resource_path(rel):
+    try:
+        base = sys._MEIPASS
+    except Exception:
+        base = os.path.abspath(".")
+    return os.path.join(base, rel)
+
+def get_user_db_path(filename="coffee_journal.db"):
+    # use local appdata for persistence on Windows; fallback to cwd
+    if os.name == "nt":
+        base = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
+    else:
+        base = os.path.expanduser("~")
+    appdir = os.path.join(base, "CoffeeJournal")
+    os.makedirs(appdir, exist_ok=True)
+    return os.path.join(appdir, filename)
 
 class DatabaseManager:
-    """Менеджер SQLite для двух таблиц: coffee_beans и brewing_sessions."""
+    def __init__(self, db_path: Optional[str] = None):
+        self.template_db = resource_path(os.path.join("ui", "db_template.sqlite"))  # optional template
+        self.db_path = db_path or get_user_db_path()
+        # if db not exists and template shipped — copy it
+        if not os.path.exists(self.db_path) and os.path.exists(self.template_db):
+            try:
+                shutil.copyfile(self.template_db, self.db_path)
+            except Exception:
+                pass
+        self.conn = sqlite3.connect(self.db_path)
+        self.conn.execute("PRAGMA foreign_keys = ON")
+        self._create_tables()
 
-    def __init__(self, db_name: str = "coffee_journal.db"):
-        self.db_name = db_name
-        # создаём каталог если нужно (например для размещения БД рядом)
-        db_dir = os.path.dirname(os.path.abspath(self.db_name))
-        if db_dir and not os.path.exists(db_dir):
-            os.makedirs(db_dir, exist_ok=True)
-        self.init_database()
-
-    def _connect(self):
-        conn = sqlite3.connect(self.db_name)
-        conn.row_factory = sqlite3.Row
-        # включаем FK для текущего соединения
-        conn.execute("PRAGMA foreign_keys = ON")
-        return conn
-
-    def init_database(self) -> None:
-        """Инициализация таблиц, если их ещё нет."""
-        conn = self._connect()
-        cur = conn.cursor()
-
-        cur.execute(
-            """
+    def _create_tables(self):
+        c = self.conn.cursor()
+        c.execute('''
             CREATE TABLE IF NOT EXISTS coffee_beans (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 roaster TEXT,
-                roast_level TEXT CHECK(roast_level IN ('Light', 'Medium', 'Dark')) DEFAULT 'Medium',
+                roast_level TEXT,
                 origin TEXT,
                 processing_method TEXT,
                 tasting_notes TEXT,
                 rating REAL DEFAULT 0,
-                price REAL DEFAULT 0,
+                price REAL,
                 purchase_date TEXT,
                 image BLOB,
-                created_at TEXT DEFAULT (datetime('now'))
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
-            """
-        )
-
-        cur.execute(
-            """
+        ''')
+        c.execute('''
             CREATE TABLE IF NOT EXISTS brewing_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 coffee_bean_id INTEGER NOT NULL,
@@ -61,397 +68,140 @@ class DatabaseManager:
                 water_weight REAL,
                 rating REAL,
                 notes TEXT,
-                created_at TEXT DEFAULT (datetime('now')),
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (coffee_bean_id) REFERENCES coffee_beans(id) ON DELETE CASCADE
             )
-            """
-        )
+        ''')
+        self.conn.commit()
 
-        conn.commit()
-        conn.close()
-
-    # ---------- Вспомогательные методы ----------
-    @staticmethod
-    def _pixmap_to_bytes(pix: Optional[QPixmap]) -> Optional[bytes]:
-        """Преобразует QPixmap в бинарный PNG или возвращает None."""
-        if not pix:
+    def _pixmap_to_bytes(self, pix: QPixmap) -> Optional[bytes]:
+        if pix is None or pix.isNull():
             return None
-        if isinstance(pix, QPixmap) and not pix.isNull():
-            buf = QBuffer()
-            buf.open(QIODevice.WriteOnly)
-            # сохраняем в PNG
-            pix.save(buf, "PNG")
-            data = buf.data()
-            buf.close()
-            # QByteArray -> bytes
-            return bytes(data)
-        return None
+        buf = QBuffer()
+        buf.open(QIODevice.WriteOnly)
+        pix.save(buf, "PNG")
+        data = bytes(buf.data())
+        buf.close()
+        return data
 
-    # ---------- Методы для coffee_beans ----------
-    def add_coffee_bean(
-        self,
-        name: str,
-        roaster: str = "",
-        roast_level: str = "Medium",
-        origin: str = "",
-        processing_method: str = "",
-        tasting_notes: str = "",
-        rating: float = 0.0,
-        price: float = 0.0,
-        purchase_date: str = "",
-        image: Optional[QPixmap] = None,
-    ) -> int:
-        """Добавляет запись и возвращает id или -1 при ошибке."""
-        conn = self._connect()
-        cur = conn.cursor()
-        image_data = self._pixmap_to_bytes(image)
-
+    def add_coffee_bean(self, name, roaster="", roast_level="Medium", origin="", processing_method="",
+                        tasting_notes="", rating=0.0, price=0.0, purchase_date="", image: QPixmap = None) -> int:
+        img = None
+        if isinstance(image, QPixmap):
+            img = self._pixmap_to_bytes(image)
         try:
-            cur.execute(
-                """
-                INSERT INTO coffee_beans
-                (name, roaster, roast_level, origin, processing_method, tasting_notes,
-                 rating, price, purchase_date, image)
+            c = self.conn.cursor()
+            c.execute('''
+                INSERT INTO coffee_beans (name, roaster, roast_level, origin, processing_method,
+                                          tasting_notes, rating, price, purchase_date, image)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    name,
-                    roaster,
-                    roast_level,
-                    origin,
-                    processing_method,
-                    tasting_notes,
-                    rating,
-                    price,
-                    purchase_date,
-                    image_data,
-                ),
-            )
-            bean_id = cur.lastrowid
-            conn.commit()
-            return bean_id
-        except sqlite3.Error:
+            ''', (name, roaster, roast_level, origin, processing_method, tasting_notes, rating, price, purchase_date, img))
+            self.conn.commit()
+            return c.lastrowid
+        except Exception:
             return -1
-        finally:
-            conn.close()
 
     def get_all_coffee_beans(self) -> List[Dict[str, Any]]:
-        """Возвращает список словарей с полями таблицы coffee_beans."""
-        conn = self._connect()
-        cur = conn.cursor()
-        try:
-            cur.execute("SELECT * FROM coffee_beans ORDER BY created_at DESC")
-            rows = [dict(r) for r in cur.fetchall()]
-            return rows
-        except sqlite3.Error:
-            return []
-        finally:
-            conn.close()
+        c = self.conn.cursor()
+        c.execute('SELECT * FROM coffee_beans ORDER BY created_at DESC')
+        cols = [d[0] for d in c.description]
+        return [dict(zip(cols, row)) for row in c.fetchall()]
 
-    def update_coffee_bean(
-        self,
-        bean_id: int,
-        name: Optional[str] = None,
-        roaster: Optional[str] = None,
-        roast_level: Optional[str] = None,
-        origin: Optional[str] = None,
-        processing_method: Optional[str] = None,
-        tasting_notes: Optional[str] = None,
-        rating: Optional[float] = None,
-        price: Optional[float] = None,
-        purchase_date: Optional[str] = None,
-        image: Optional[QPixmap] = None,
-    ) -> bool:
-        """Обновляет указанные поля записи."""
-        conn = self._connect()
-        cur = conn.cursor()
-        try:
-            updates = []
-            params = []
-            if name is not None:
-                updates.append("name = ?")
-                params.append(name)
-            if roaster is not None:
-                updates.append("roaster = ?")
-                params.append(roaster)
-            if roast_level is not None:
-                updates.append("roast_level = ?")
-                params.append(roast_level)
-            if origin is not None:
-                updates.append("origin = ?")
-                params.append(origin)
-            if processing_method is not None:
-                updates.append("processing_method = ?")
-                params.append(processing_method)
-            if tasting_notes is not None:
-                updates.append("tasting_notes = ?")
-                params.append(tasting_notes)
-            if rating is not None:
-                updates.append("rating = ?")
-                params.append(rating)
-            if price is not None:
-                updates.append("price = ?")
-                params.append(price)
-            if purchase_date is not None:
-                updates.append("purchase_date = ?")
-                params.append(purchase_date)
-            if image is not None:
-                img_bytes = self._pixmap_to_bytes(image)
-                updates.append("image = ?")
-                params.append(img_bytes)
-
-            if not updates:
-                return True
-
-            params.append(bean_id)
-            query = f"UPDATE coffee_beans SET {', '.join(updates)} WHERE id = ?"
-            cur.execute(query, params)
-            conn.commit()
+    def update_coffee_bean(self, bean_id, **kwargs) -> bool:
+        if not kwargs:
             return True
-        except sqlite3.Error:
-            conn.rollback()
+        fields = []
+        vals = []
+        for k, v in kwargs.items():
+            if k == "image" and isinstance(v, QPixmap):
+                v = self._pixmap_to_bytes(v)
+            fields.append(f"{k} = ?")
+            vals.append(v)
+        vals.append(bean_id)
+        try:
+            self.conn.cursor().execute(f"UPDATE coffee_beans SET {', '.join(fields)} WHERE id = ?", vals)
+            self.conn.commit()
+            return True
+        except Exception:
             return False
-        finally:
-            conn.close()
 
-    def delete_coffee_bean(self, bean_id: int) -> bool:
-        """Удаляет сорт кофе; связанные сессии удаляются каскадом."""
-        conn = self._connect()
-        cur = conn.cursor()
+    def delete_coffee_bean(self, bean_id) -> bool:
         try:
-            cur.execute("DELETE FROM coffee_beans WHERE id = ?", (bean_id,))
-            conn.commit()
-            return cur.rowcount > 0
-        except sqlite3.Error:
-            conn.rollback()
+            c = self.conn.cursor()
+            c.execute('DELETE FROM coffee_beans WHERE id = ?', (bean_id,))
+            self.conn.commit()
+            return c.rowcount > 0
+        except Exception:
             return False
-        finally:
-            conn.close()
 
-    def search_coffee_beans(self, query: str) -> List[Dict[str, Any]]:
-        """Поиск по основным текстовым полям."""
-        conn = self._connect()
-        cur = conn.cursor()
-        try:
-            p = f"%{query}%"
-            cur.execute(
-                """
-                SELECT * FROM coffee_beans
-                WHERE name LIKE ? OR roaster LIKE ? OR origin LIKE ? OR tasting_notes LIKE ?
-                ORDER BY created_at DESC
-                """,
-                (p, p, p, p),
-            )
-            return [dict(r) for r in cur.fetchall()]
-        except sqlite3.Error:
-            return []
-        finally:
-            conn.close()
+    def search_coffee_beans(self, q: str):
+        pat = f"%{q}%"
+        c = self.conn.cursor()
+        c.execute('SELECT * FROM coffee_beans WHERE name LIKE ? OR roaster LIKE ? OR origin LIKE ? OR tasting_notes LIKE ? ORDER BY created_at DESC',
+                  (pat, pat, pat, pat))
+        cols = [d[0] for d in c.description]
+        return [dict(zip(cols, r)) for r in c.fetchall()]
 
-    def get_coffee_with_images_count(self) -> int:
-        """Количество записей, где image не NULL."""
-        conn = self._connect()
-        cur = conn.cursor()
-        try:
-            cur.execute("SELECT COUNT(*) FROM coffee_beans WHERE image IS NOT NULL")
-            res = cur.fetchone()
-            return int(res[0]) if res else 0
-        except sqlite3.Error:
-            return 0
-        finally:
-            conn.close()
+    def get_coffee_with_images_count(self):
+        c = self.conn.cursor()
+        c.execute('SELECT COUNT(*) FROM coffee_beans WHERE image IS NOT NULL')
+        r = c.fetchone()
+        return r[0] if r else 0
 
-    # ---------- Методы для brewing_sessions ----------
-    def add_brewing_session(
-        self,
-        coffee_bean_id: int,
-        brew_method: str,
-        grind_size: str = "",
-        water_temp: int = 0,
-        brew_time: int = 0,
-        coffee_weight: float = 0.0,
-        water_weight: float = 0.0,
-        rating: float = 0.0,
-        notes: str = "",
-    ) -> int:
-        conn = self._connect()
-        cur = conn.cursor()
+    # brewing sessions
+    def add_brewing_session(self, coffee_bean_id, brew_method, grind_size="", water_temp=0, brew_time=0,
+                            coffee_weight=0.0, water_weight=0.0, rating=0.0, notes="") -> int:
         try:
-            cur.execute(
-                """
+            c = self.conn.cursor()
+            c.execute('''
                 INSERT INTO brewing_sessions
-                (coffee_bean_id, brew_method, grind_size, water_temp, brew_time,
-                 coffee_weight, water_weight, rating, notes)
+                (coffee_bean_id, brew_method, grind_size, water_temp, brew_time, coffee_weight, water_weight, rating, notes)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    coffee_bean_id,
-                    brew_method,
-                    grind_size,
-                    water_temp,
-                    brew_time,
-                    coffee_weight,
-                    water_weight,
-                    rating,
-                    notes,
-                ),
-            )
-            sid = cur.lastrowid
-            conn.commit()
-            return sid
-        except sqlite3.Error:
+            ''', (coffee_bean_id, brew_method, grind_size, water_temp, brew_time, coffee_weight, water_weight, rating, notes))
+            self.conn.commit()
+            return c.lastrowid
+        except Exception:
             return -1
-        finally:
-            conn.close()
 
-    def get_all_brewing_sessions(self) -> List[Dict[str, Any]]:
-        conn = self._connect()
-        cur = conn.cursor()
-        try:
-            cur.execute(
-                """
-                SELECT bs.*, cb.name AS coffee_name
-                FROM brewing_sessions bs
-                JOIN coffee_beans cb ON bs.coffee_bean_id = cb.id
-                ORDER BY bs.created_at DESC
-                """
-            )
-            return [dict(r) for r in cur.fetchall()]
-        except sqlite3.Error:
-            return []
-        finally:
-            conn.close()
+    def get_all_brewing_sessions(self):
+        c = self.conn.cursor()
+        c.execute('SELECT bs.*, cb.name as coffee_name FROM brewing_sessions bs JOIN coffee_beans cb ON bs.coffee_bean_id = cb.id ORDER BY bs.created_at DESC')
+        cols = [d[0] for d in c.description]
+        return [dict(zip(cols, r)) for r in c.fetchall()]
 
-    def update_brewing_session(
-        self,
-        session_id: int,
-        coffee_bean_id: Optional[int] = None,
-        brew_method: Optional[str] = None,
-        grind_size: Optional[str] = None,
-        water_temp: Optional[int] = None,
-        brew_time: Optional[int] = None,
-        coffee_weight: Optional[float] = None,
-        water_weight: Optional[float] = None,
-        rating: Optional[float] = None,
-        notes: Optional[str] = None,
-    ) -> bool:
-        conn = self._connect()
-        cur = conn.cursor()
-        try:
-            updates = []
-            params = []
-            if coffee_bean_id is not None:
-                updates.append("coffee_bean_id = ?")
-                params.append(coffee_bean_id)
-            if brew_method is not None:
-                updates.append("brew_method = ?")
-                params.append(brew_method)
-            if grind_size is not None:
-                updates.append("grind_size = ?")
-                params.append(grind_size)
-            if water_temp is not None:
-                updates.append("water_temp = ?")
-                params.append(water_temp)
-            if brew_time is not None:
-                updates.append("brew_time = ?")
-                params.append(brew_time)
-            if coffee_weight is not None:
-                updates.append("coffee_weight = ?")
-                params.append(coffee_weight)
-            if water_weight is not None:
-                updates.append("water_weight = ?")
-                params.append(water_weight)
-            if rating is not None:
-                updates.append("rating = ?")
-                params.append(rating)
-            if notes is not None:
-                updates.append("notes = ?")
-                params.append(notes)
-
-            if not updates:
-                return True
-
-            params.append(session_id)
-            query = f"UPDATE brewing_sessions SET {', '.join(updates)} WHERE id = ?"
-            cur.execute(query, params)
-            conn.commit()
+    def update_brewing_session(self, session_id, **kwargs) -> bool:
+        if not kwargs:
             return True
-        except sqlite3.Error:
-            conn.rollback()
+        fields = []; vals = []
+        for k, v in kwargs.items():
+            fields.append(f"{k} = ?"); vals.append(v)
+        vals.append(session_id)
+        try:
+            self.conn.cursor().execute(f"UPDATE brewing_sessions SET {', '.join(fields)} WHERE id = ?", vals)
+            self.conn.commit()
+            return True
+        except Exception:
             return False
-        finally:
-            conn.close()
 
-    def delete_brewing_session(self, session_id: int) -> bool:
-        conn = self._connect()
-        cur = conn.cursor()
+    def delete_brewing_session(self, session_id) -> bool:
         try:
-            cur.execute("DELETE FROM brewing_sessions WHERE id = ?", (session_id,))
-            conn.commit()
-            return cur.rowcount > 0
-        except sqlite3.Error:
-            conn.rollback()
+            c = self.conn.cursor(); c.execute('DELETE FROM brewing_sessions WHERE id = ?', (session_id,)); self.conn.commit(); return c.rowcount>0
+        except Exception:
             return False
-        finally:
-            conn.close()
 
-    def search_brewing_sessions(self, query: str) -> List[Dict[str, Any]]:
-        conn = self._connect()
-        cur = conn.cursor()
-        try:
-            p = f"%{query}%"
-            cur.execute(
-                """
-                SELECT bs.*, cb.name AS coffee_name
-                FROM brewing_sessions bs
-                JOIN coffee_beans cb ON bs.coffee_bean_id = cb.id
-                WHERE cb.name LIKE ? OR bs.brew_method LIKE ? OR bs.notes LIKE ?
-                ORDER BY bs.created_at DESC
-                """,
-                (p, p, p),
-            )
-            return [dict(r) for r in cur.fetchall()]
-        except sqlite3.Error:
-            return []
-        finally:
-            conn.close()
+    def search_brewing_sessions(self, q: str):
+        pat = f"%{q}%"
+        c = self.conn.cursor()
+        c.execute('SELECT bs.*, cb.name as coffee_name FROM brewing_sessions bs JOIN coffee_beans cb ON bs.coffee_bean_id = cb.id WHERE cb.name LIKE ? OR bs.brew_method LIKE ? OR bs.notes LIKE ? ORDER BY bs.created_at DESC',
+                  (pat, pat, pat))
+        cols = [d[0] for d in c.description]
+        return [dict(zip(cols, r)) for r in c.fetchall()]
 
-    def get_detailed_statistics(self) -> Dict[str, Any]:
-        conn = self._connect()
-        cur = conn.cursor()
-        try:
-            cur.execute("SELECT COUNT(*) FROM coffee_beans")
-            total_beans = cur.fetchone()[0] or 0
-
-            cur.execute("SELECT AVG(rating) FROM coffee_beans WHERE rating > 0")
-            avg_bean = cur.fetchone()[0]
-            avg_bean_rating = round(avg_bean, 1) if avg_bean else 0
-
-            cur.execute("SELECT AVG(price) FROM coffee_beans WHERE price > 0")
-            avg_price_val = cur.fetchone()[0]
-            avg_price = round(avg_price_val, 0) if avg_price_val else 0
-
-            cur.execute("SELECT COUNT(*) FROM brewing_sessions")
-            total_sessions = cur.fetchone()[0] or 0
-
-            cur.execute("SELECT AVG(rating) FROM brewing_sessions WHERE rating > 0")
-            avg_sess = cur.fetchone()[0]
-            avg_session_rating = round(avg_sess, 1) if avg_sess else 0
-
-            return {
-                "total_beans": total_beans,
-                "total_sessions": total_sessions,
-                "avg_bean_rating": avg_bean_rating,
-                "avg_session_rating": avg_session_rating,
-                "avg_price": avg_price,
-            }
-        except sqlite3.Error:
-            return {
-                "total_beans": 0,
-                "total_sessions": 0,
-                "avg_bean_rating": 0,
-                "avg_session_rating": 0,
-                "avg_price": 0,
-            }
-        finally:
-            conn.close()
+    def get_detailed_statistics(self):
+        c = self.conn.cursor()
+        c.execute('SELECT COUNT(*) FROM coffee_beans'); total_beans = c.fetchone()[0]
+        c.execute('SELECT AVG(rating) FROM coffee_beans WHERE rating>0'); avg_bean = c.fetchone()[0] or 0
+        c.execute('SELECT AVG(price) FROM coffee_beans WHERE price>0'); avg_price = c.fetchone()[0] or 0
+        c.execute('SELECT COUNT(*) FROM brewing_sessions'); total_sessions = c.fetchone()[0]
+        c.execute('SELECT AVG(rating) FROM brewing_sessions WHERE rating>0'); avg_sess = c.fetchone()[0] or 0
+        return {"total_beans": total_beans, "avg_bean_rating": round(avg_bean,1), "avg_price": round(avg_price,0), "total_sessions": total_sessions, "avg_session_rating": round(avg_sess,1)}
