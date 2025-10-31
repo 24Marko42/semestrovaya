@@ -1,20 +1,25 @@
-# main.py — компактный исправленный файл
-import os, sys, logging
+import os, sys, shutil, logging
 from PyQt5 import uic
-from PyQt5.QtCore import Qt, QSortFilterProxyModel
 from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QDialog, QMessageBox, QMenu, QHeaderView,
-    QTextEdit, QWidget, QVBoxLayout
+    QApplication, QMainWindow, QMessageBox, QFileDialog,
+    QTextEdit, QWidget, QVBoxLayout, QAction
 )
+from PyQt5.QtCore import Qt, QSortFilterProxyModel
+from PyQt5.QtGui import QColor
 
 from database import DatabaseManager
 from models import CoffeeBeansTableModel, BrewingSessionsTableModel
 from dialogs import CoffeeDialog, BrewingDialog, DetailsDialog
 
+# ============ Настройки логов ============
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
+# ============ Константы ============
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_FILENAME = "coffee_journal.db"
+
+# ============ Темы ============
 APP_CSS = """
 QMainWindow { background: #121212; color: #eaeaea; }
 QWidget { background: #121212; color: #eaeaea; }
@@ -26,28 +31,42 @@ QTabBar::tab { background: #212121; color: #eaeaea; padding: 8px 14px; border-ra
 QTabBar::tab:selected { background: #3b82f6; color: white; }
 """
 
-def resource_path(rel):
-    return os.path.join(getattr(sys, "_MEIPASS", BASE_DIR), rel)
+# ============ MEIPASS ============
+def resource_path(relative_path):
+    """Возвращает абсолютный путь к ресурсу, работает и в exe, и в dev."""
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
+
+# =======================================================================
+#                             MainWindow
+# =======================================================================
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+
+        # === Загрузка UI ===
         ui_file = resource_path(os.path.join("ui", "main_window.ui"))
         if not os.path.exists(ui_file):
             QMessageBox.critical(None, "Ошибка", f"UI не найден: {ui_file}")
             raise SystemExit(1)
-
         uic.loadUi(ui_file, self)
+
+        # === Стили ===
         app = QApplication.instance()
         if app:
             app.setStyleSheet(APP_CSS)
 
-        # БД и модели
+        # === Подключаем базу и модели ===
+        self.db_path = os.path.join(BASE_DIR, DB_FILENAME)
         self.db = DatabaseManager()
         self.coffee_model = CoffeeBeansTableModel()
         self.brewing_model = BrewingSessionsTableModel()
 
-        # proxy — всегда привязан к source-модели (для сортировки/фильтрации)
+        # === Proxy модели для фильтрации/сортировки ===
         self.coffee_proxy = QSortFilterProxyModel(self)
         self.coffee_proxy.setSourceModel(self.coffee_model)
         self.coffee_proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
@@ -56,11 +75,62 @@ class MainWindow(QMainWindow):
         self.brewing_proxy.setSourceModel(self.brewing_model)
         self.brewing_proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
 
-        # Привязка таблиц (если виджеты существуют в .ui)
+        # === Привязка таблиц ===
         self._bind_table_safe("coffeeTable", self.coffee_proxy)
         self._bind_table_safe("brewingTable", self.brewing_proxy)
 
-        # Подключения кнопок (без падения, если объект не найден)
+        # === Кнопки и поиск ===
+        self._connect_all_buttons()
+        self._connect_search_enter()
+
+        # === Контекстное меню и клики ===
+        self._setup_contexts()
+
+        # === Статистика ===
+        self._ensure_stats_text()
+
+        # === Меню Импорт/Экспорт ===
+        self._setup_menu()
+
+        # === Первая загрузка данных ===
+        self.load_coffee_data()
+        self.load_brewing_data()
+
+    # -------------------------------------------------------------------
+    #                         Подключения
+    # -------------------------------------------------------------------
+    def _connect_safe(self, name, slot):
+        """Безопасное подключение кнопок"""
+        try:
+            getattr(self, name).clicked.connect(slot)
+        except Exception:
+            pass
+
+    def _connect_return_safe(self, name, slot):
+        """Подключение Enter"""
+        try:
+            getattr(self, name).returnPressed.connect(slot)
+        except Exception:
+            pass
+
+    def _bind_table_safe(self, name, model):
+        """Привязка таблицы к модели"""
+        try:
+            view = getattr(self, name)
+            view.setModel(model)
+            view.setSortingEnabled(True)
+            view.setSelectionBehavior(view.SelectRows)
+        except Exception:
+            pass
+
+    def _safe(self, func):
+        """Безопасный вызов без падений"""
+        try:
+            func()
+        except Exception:
+            pass
+
+    def _connect_all_buttons(self):
         self._connect_safe("addCoffeeBtn", self.add_coffee)
         self._connect_safe("editCoffeeBtn", self.edit_coffee)
         self._connect_safe("deleteCoffeeBtn", self.delete_coffee)
@@ -75,53 +145,80 @@ class MainWindow(QMainWindow):
         self._connect_safe("brewingSearchBtn", self.search_brewing)
         self._connect_safe("brewingClearBtn", self.clear_brewing_search)
 
-        # Enter для поисков
+    def _connect_search_enter(self):
         self._connect_return_safe("coffeeSearchEdit", self.search_coffee)
         self._connect_return_safe("coffeeSearchInput", self.search_coffee)
         self._connect_return_safe("brewingSearchEdit", self.search_brewing)
 
-        # клик по ячейке — выделить строку
+    def _setup_contexts(self):
+        """Настройка контекстных меню и двойных кликов"""
         self._safe(lambda: self.coffeeTable.clicked.connect(lambda i: self.coffeeTable.selectRow(i.row())))
         self._safe(lambda: self.brewingTable.clicked.connect(lambda i: self.brewingTable.selectRow(i.row())))
-
-        # контекстные меню и double click
-        self._safe(lambda: self.coffeeTable.setContextMenuPolicy(Qt.CustomContextMenu))
-        self._safe(lambda: self.coffeeTable.customContextMenuRequested.connect(self._coffee_context))
         self._safe(lambda: self.coffeeTable.doubleClicked.connect(self.on_coffee_double_clicked))
-        self._safe(lambda: self.brewingTable.setContextMenuPolicy(Qt.CustomContextMenu))
-        self._safe(lambda: self.brewingTable.customContextMenuRequested.connect(self._brewing_context))
         self._safe(lambda: self.brewingTable.doubleClicked.connect(self.on_brewing_double_clicked))
 
-        # Обеспечим наличие QTextEdit для статистики, если в .ui он отсутствует
+    # -------------------------------------------------------------------
+    #                        Статистика fallback
+    # -------------------------------------------------------------------
+    def _ensure_stats_text(self):
+        """Создаёт QTextEdit для статистики, если его нет"""
         if not hasattr(self, "statsText") or self.statsText is None:
-            # Попробуем найти вкладку "stats" и вставить туда
             tab_widget = getattr(self, "tabs", None) or getattr(self, "tabWidget", None)
             if tab_widget:
-                # добавим QTextEdit в последний таб как fallback
-                try:
-                    last_index = tab_widget.count() - 1
-                    w = tab_widget.widget(last_index)
-                    # ищем в контейнере placeholder; если он пустой — добавим QTextEdit
-                    te = QTextEdit()
-                    te.setReadOnly(True)
-                    layout = w.layout() if isinstance(w, QWidget) else None
-                    if layout:
-                        layout.addWidget(te)
-                    else:
-                        # если нет layout — заменим виджет содержимым
-                        container = QWidget()
-                        v = QVBoxLayout(container)
-                        v.addWidget(te)
-                        tab_widget.removeTab(last_index)
-                        tab_widget.insertTab(last_index, container, tab_widget.tabText(last_index))
-                    self.statsText = te
-                except Exception:
-                    # полностью молча пропускаем — статистику всё равно можно записать в лог
-                    pass
+                last_index = tab_widget.count() - 1
+                container = QWidget()
+                v = QVBoxLayout(container)
+                te = QTextEdit()
+                te.setReadOnly(True)
+                v.addWidget(te)
+                tab_widget.removeTab(last_index)
+                tab_widget.insertTab(last_index, container, "Статистика")
+                self.statsText = te
 
-        # начальная загрузка данных (update_stats вызывается внутри)
-        self.load_coffee_data()
-        self.load_brewing_data()
+    # -------------------------------------------------------------------
+    #                       Импорт / Экспорт БД
+    # -------------------------------------------------------------------
+    def _setup_menu(self):
+        """Создаёт меню Файл → Импорт/Экспорт"""
+        bar = self.menuBar()
+        file_menu = bar.addMenu("Файл")
+
+        export_action = QAction("Экспортировать БД…", self)
+        export_action.triggered.connect(self.export_database)
+        file_menu.addAction(export_action)
+
+        import_action = QAction("Импортировать БД…", self)
+        import_action.triggered.connect(self.import_database)
+        file_menu.addAction(import_action)
+
+    def export_database(self):
+        """Сохранить копию базы данных"""
+        if not os.path.exists(self.db_path):
+            QMessageBox.critical(self, "Ошибка", f"Файл не найден: {self.db_path}")
+            return
+        target, _ = QFileDialog.getSaveFileName(self, "Сохранить базу", "", "SQLite DB (*.db)")
+        if target:
+            shutil.copy2(self.db_path, target)
+            QMessageBox.information(self, "Успех", f"База данных экспортирована:\n{target}")
+
+    def import_database(self):
+        """Импортировать другую базу данных"""
+        src, _ = QFileDialog.getOpenFileName(self, "Импортировать базу", "", "SQLite DB (*.db)")
+        if not src:
+            return
+        confirm = QMessageBox.question(
+            self, "Подтверждение", "Импорт заменит текущую базу данных. Продолжить?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if confirm == QMessageBox.Yes:
+            try:
+                shutil.copy2(src, self.db_path)
+                self.db = DatabaseManager()
+                self.load_coffee_data()
+                self.load_brewing_data()
+                QMessageBox.information(self, "Готово", f"Импорт выполнен:\n{src}")
+            except Exception as e:
+                QMessageBox.critical(self, "Ошибка", str(e))
 
     # ---- вспомогательные ----
     def _safe(self, fn):
